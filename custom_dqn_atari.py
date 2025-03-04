@@ -11,6 +11,7 @@ import numpy as np
 import shimmy
 import torch
 import torch.nn as nn
+import tqdm
 from gymnasium.wrappers import FrameStackObservation
 from stable_baselines3.common.atari_wrappers import (
     EpisodicLifeEnv,
@@ -63,6 +64,12 @@ def parse_arguments():
     parser.add_argument(
         "--total_episodes", help="total number of episodes", type=int, default=10_000
     )
+    parser.add_argument(
+        "--discount_factor",
+        help="discount factor for cumulative rewards",
+        type=int,
+        default=0.99,
+    )
     return parser.parse_args()
 
 
@@ -109,7 +116,7 @@ class Agent:
         ).to(device)
 
     def _init_replay_buffer(self, buffer_size: int):
-        return ReplayBuffer(
+        replay_buffer = ReplayBuffer(
             buffer_size=buffer_size,
             observation_space=self.env.observation_space,
             action_space=self.env.action_space,
@@ -117,13 +124,12 @@ class Agent:
         )
 
         curr_size = 0
-        breakpoint()
         while curr_size < self.buffer_size:
             curr_obs, info = self.env.reset()
             while True:
                 action = self.env.action_space.sample()
                 next_obs, reward, terminated, truncated, info = self.env.step(action)
-                self.replay_buffer.add(
+                replay_buffer.add(
                     obs=curr_obs,
                     next_obs=next_obs,
                     action=action,
@@ -135,6 +141,7 @@ class Agent:
                     break
                 curr_size += 1
                 curr_obs = next_obs
+        return replay_buffer
 
     def _create_env(self, env_id: str, total_timesteps: int):
         return gym.make(
@@ -159,8 +166,18 @@ class Agent:
         if prob < self.epsilon:
             action = self.env.action_space.sample()
         else:
-            action = torch.argmax(self.dqn(state))
-        return action.cpu().numpy()
+            with torch.no_grad():
+                self.dqn.eval()
+                action = torch.argmax(self.dqn(state))
+        return action.cpu().numpy() if isinstance(action, Tensor) else action
+
+    def _get_max_q_value(self, state):
+        state = torch.from_numpy(state).float().to(self.device)
+        state = torch.squeeze(torch.unsqueeze(state, 0), 4)
+        with torch.no_grad():
+            self.dqn.eval()
+            max_q_value = torch.max(self.dqn(state))
+        return max_q_value.cpu().numpy()
 
 
 def main(args):
@@ -201,7 +218,30 @@ def main(args):
                 done=terminated,
                 infos=[info],
             )
+
+            minibatch = agent.replay_buffer.sample(args.batch_size)
+            states = torch.squeeze(minibatch[0], 4)
+            targets = np.zeros((args.batch_size, 1))
+            for i in range(args.batch_size):
+                is_terminal = minibatch[3][i][0]
+                reward = minibatch[4][i][0]
+                if is_terminal:
+                    targets[i] = reward.cpu().numpy()
+                else:
+                    targets[
+                        i
+                    ] = reward.cpu().numpy() + args.discount_factor * agent._get_max_q_value(
+                        next_state
+                    )
+
+            targets = torch.from_numpy(targets).float().to(device)
+
+            for data, target in zip(states, targets):
+                breakpoint()
+
             curr_state = next_state
+            if terminated or truncated:
+                break
 
 
 if __name__ == "__main__":
