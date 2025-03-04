@@ -236,6 +236,7 @@ def main(args):
 
             targets = torch.from_numpy(targets).float().to(device)
 
+            agent.dqn.train()
             for data, target in zip(states, targets):
                 breakpoint()
 
